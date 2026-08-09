@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # ── 1. Checkout our repo (has the zip + this workflow) ────────────────
+      # ── 1. Checkout our repo ──────────────────────────────────────────────
       - name: Checkout our repo (patches)
         uses: actions/checkout@v4
         with:
@@ -60,7 +60,7 @@ jobs:
           cp "$SRC/ui/components/CaptureLayout.kt" \
              "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
 
-          echo "All files copied successfully!"
+          echo "All files copied!"
 
       # ── 5. Apply text patches to existing JCA files via Python ────────────
       - name: Apply text patches to existing JCA files
@@ -202,20 +202,75 @@ jobs:
           PYEOF
 
       # ── 5b. Fix CameraSession.kt — private → internal ─────────────────────
-      #
-      # ConcurrentCameraSession.kt calls getPendingRecording() and
-      # startVideoRecordingInternal() from a different file in the same module.
-      # Kotlin file-private blocks cross-file calls, so both must be `internal`.
-      # ──────────────────────────────────────────────────────────────────────
       - name: Fix CameraSession.kt visibility (private → internal)
         run: |
           FILE="jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
-          sed -i 's/private fun getPendingRecording(/internal fun getPendingRecording(/g' "$FILE"
-          sed -i 's/private suspend fun startVideoRecordingInternal(/internal suspend fun startVideoRecordingInternal(/g' "$FILE"
-          echo "=== Verify fix applied ==="
+          python3 - << 'EOF'
+          import re
+          path = "jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
+          with open(path, encoding='utf-8') as f:
+              src = f.read()
+          src = re.sub(r'\bprivate\b(\s+fun\s+getPendingRecording\b)', r'internal\1', src)
+          src = re.sub(r'\bprivate\b(\s+suspend\s+fun\s+startVideoRecordingInternal\b)', r'internal\1', src)
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(src)
+          print("Done")
+          EOF
+          echo "=== Verify ==="
           grep -n "fun getPendingRecording\|fun startVideoRecordingInternal" "$FILE"
 
-      # ── 6. Sanity-check ───────────────────────────────────────────────────
+      # ── 5c. Fix DualCameraComponents.kt — replace unavailable icons ────────
+      #
+      # JCA does not depend on material-icons-extended by default.
+      # Icons.Outlined.Duo / GridView / PictureInPicture / VideoFile are in that
+      # extended library and cause "Unresolved reference 'icons'" at compile time.
+      # We replace them with core Material icons that are always available.
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Fix DualCameraComponents.kt icon imports
+        run: |
+          FILE="jca/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt"
+          python3 - << 'EOF'
+          path = "jca/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt"
+          with open(path, encoding='utf-8') as f:
+              src = f.read()
+
+          # Remove extended-library imports that don't exist in core icons
+          replacements = {
+              "import androidx.compose.material.icons.outlined.Duo\n": "",
+              "import androidx.compose.material.icons.outlined.GridView\n": "",
+              "import androidx.compose.material.icons.outlined.PictureInPicture\n": "",
+              "import androidx.compose.material.icons.outlined.VideoFile\n": "",
+          }
+          # Add available replacements after Icons import line
+          replacements["import androidx.compose.material.icons.Icons\n"] = (
+              "import androidx.compose.material.icons.Icons\n"
+              "import androidx.compose.material.icons.outlined.Videocam\n"
+              "import androidx.compose.material.icons.outlined.ViewComfy\n"
+              "import androidx.compose.material.icons.outlined.FilterNone\n"
+              "import androidx.compose.material.icons.outlined.FolderCopy\n"
+          )
+
+          # Replace icon usages
+          usages = {
+              "Icons.Outlined.Duo":             "Icons.Outlined.Videocam",
+              "Icons.Outlined.GridView":        "Icons.Outlined.ViewComfy",
+              "Icons.Outlined.PictureInPicture":"Icons.Outlined.FilterNone",
+              "Icons.Outlined.VideoFile":       "Icons.Outlined.FolderCopy",
+          }
+
+          for old, new in replacements.items():
+              src = src.replace(old, new)
+          for old, new in usages.items():
+              src = src.replace(old, new)
+
+          with open(path, 'w', encoding='utf-8') as f:
+              f.write(src)
+          print("Icons fixed successfully")
+          EOF
+          echo "=== Verify icon imports ==="
+          grep -n "import.*icons\|Icons\." "$FILE"
+
+      # ── 6. Verify all patches ─────────────────────────────────────────────
       - name: Verify patches are in place
         run: |
           JCA="jca"
@@ -235,7 +290,7 @@ jobs:
                 "dualRecordingMode" "CameraAppSettings has dualRecordingMode"
 
           check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSystem.kt" \
-                "setDualRecordingMode" "CameraSystem interface has setDualRecordingMode"
+                "setDualRecordingMode" "CameraSystem has setDualRecordingMode"
 
           check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt" \
                 "setDualRecordingMode" "CameraXCameraSystem has setDualRecordingMode"
@@ -252,9 +307,12 @@ jobs:
           check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
                 "internal suspend fun startVideoRecordingInternal" "CameraSession startVideoRecordingInternal is internal"
 
+          check "$JCA/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt" \
+                "Icons.Outlined.Videocam" "DualCameraComponents uses available icons"
+
           [ $FAIL -eq 0 ] && echo "All checks passed!" || exit 1
 
-      # ── 7. Java + Gradle ──────────────────────────────────────────────────
+      # ── 7. Java 17 + Gradle ───────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -275,7 +333,7 @@ jobs:
             -x test \
             -x lint
 
-      # ── 9. Upload artifact ────────────────────────────────────────────────
+      # ── 9. Upload APK ─────────────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
