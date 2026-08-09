@@ -1,422 +1,330 @@
-name: Build JCA Dual-Camera APK
+name: Build Android APK (NDK + SDL2)
 
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    branches: [main, master]
+    tags: ['v*.*.*']
   workflow_dispatch:
 
+env:
+  NDK_VERSION:    "26.3.11579264"
+  ANDROID_API:    "24"
+  SDL2_TAG:       "release-2.30.3"
+  IMGUI_TAG:      "v1.91.0"
+  IMPLOT_TAG:     "v0.17"
+  BUILD_NUMBER:   ${{ github.run_number }}
+
 jobs:
-  build:
-    name: Build JCA Debug APK
+  build-android-apk:
+    name: Build Android APK (C++ NDK)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
 
     steps:
-      # ── 1. Checkout our repo ──────────────────────────────────────────────
-      - name: Checkout our repo (patches)
+
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
-          path: patches
+          distribution: temurin
+          java-version: '17'
 
-      # ── 2. Clone Google's JCA source ──────────────────────────────────────
-      - name: Clone official JCA source
-        run: |
-          git clone https://github.com/google/jetpack-camera-app.git jca
-          echo "JCA cloned — $(git -C jca rev-parse --short HEAD)"
-
-      # ── 3. Unzip our dual-camera package ──────────────────────────────────
-      - name: Extract our patch zip
-        run: |
-          unzip patches/jca-dual-camera.zip -d patches/extracted
-          echo "--- Extracted files ---"
-          find patches/extracted -type f | sort
-
-      # ── 4. Copy new / replacement .kt files into the JCA tree ─────────────
-      - name: Copy new and replacement files into JCA
-        run: |
-          SRC="patches/extracted/jca-dualcam"
-          DST="jca"
-
-          cp "$SRC/core/model/DualRecordingMode.kt" \
-             "$DST/core/model/src/main/java/com/google/jetpackcamera/model/"
-
-          cp "$SRC/core/camera/CoroutineCameraProvider.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-          cp "$SRC/core/camera/CameraSessionSettings.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-          cp "$SRC/core/camera/ConcurrentCameraSession.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-
-          cp "$SRC/ui/controller/DualCameraController.kt" \
-             "$DST/ui/controller/src/main/java/com/google/jetpackcamera/ui/controller/"
-
-          cp "$SRC/ui/controller/DualCameraControllerImpl.kt" \
-             "$DST/ui/controller/impl/src/main/java/com/google/jetpackcamera/ui/controller/impl/"
-
-          cp "$SRC/ui/components/DualCameraComponents.kt" \
-             "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
-
-          cp "$SRC/ui/components/CaptureLayout.kt" \
-             "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
-
-          echo "All files copied!"
-
-      # ── 5. Apply text patches to existing JCA files via Python ────────────
-      - name: Apply text patches to existing JCA files
-        run: |
-          python3 - << 'PYEOF'
-          import sys
-
-          def patch(path, label, old, new, already_applied_marker=None):
-              with open(path, encoding='utf-8') as fh:
-                  src = fh.read()
-              marker = already_applied_marker or new
-              if marker in src:
-                  print(f"[SKIP] {label}")
-                  return
-              if old not in src:
-                  print(f"[FAIL] {label}", file=sys.stderr)
-                  print(f"       Search text not found in: {path}", file=sys.stderr)
-                  sys.exit(1)
-              with open(path, 'w', encoding='utf-8') as fh:
-                  fh.write(src.replace(old, new, 1))
-              print(f"[OK]   {label}")
-
-          JCA = "jca"
-
-          # ── A. CameraAppSettings.kt ─────────────────────────────────────
-          CAS = (f"{JCA}/core/settings/src/main/java/"
-                 "com/google/jetpackcamera/settings/model/CameraAppSettings.kt")
-
-          patch(
-              CAS,
-              "CameraAppSettings — add DualRecordingMode import",
-              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n",
-              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n"
-              "import com.google.jetpackcamera.model.DualRecordingMode\n",
-              already_applied_marker="import com.google.jetpackcamera.model.DualRecordingMode",
-          )
-
-          patch(
-              CAS,
-              "CameraAppSettings — add dualRecordingMode field",
-              "    val concurrentCameraMode: ConcurrentCameraMode = ConcurrentCameraMode.OFF,\n",
-              "    val concurrentCameraMode: ConcurrentCameraMode = ConcurrentCameraMode.OFF,\n"
-              "    val dualRecordingMode: DualRecordingMode = DualRecordingMode.PIP,\n",
-              already_applied_marker="val dualRecordingMode: DualRecordingMode",
-          )
-
-          # ── B. CameraSystem.kt ──────────────────────────────────────────
-          CS = (f"{JCA}/core/camera/src/main/java/"
-                "com/google/jetpackcamera/core/camera/CameraSystem.kt")
-
-          patch(
-              CS,
-              "CameraSystem — add setDualRecordingMode() to interface",
-              "    suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode)\n",
-              "    suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode)\n"
-              "\n"
-              "    /**\n"
-              "     * Sets the recording mode used when dual (concurrent) camera mode is active.\n"
-              "     * @param mode The [com.google.jetpackcamera.model.DualRecordingMode] to apply.\n"
-              "     */\n"
-              "    suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    )\n",
-              already_applied_marker="suspend fun setDualRecordingMode(",
-          )
-
-          # ── C. CameraXCameraSystem.kt ───────────────────────────────────
-          CXCS = (f"{JCA}/core/camera/src/main/java/"
-                  "com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt")
-
-          patch(
-              CXCS,
-              "CameraXCameraSystem — forward dualRecordingMode into ConcurrentCamera()",
-              "                                        aspectRatio = currentCameraSettings.aspectRatio\n"
-              "                                    )\n",
-              "                                        aspectRatio = currentCameraSettings.aspectRatio,\n"
-              "                                        dualRecordingMode = currentCameraSettings.dualRecordingMode\n"
-              "                                    )\n",
-              already_applied_marker="dualRecordingMode = currentCameraSettings.dualRecordingMode",
-          )
-
-          patch(
-              CXCS,
-              "CameraXCameraSystem — add setDualRecordingMode() override",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "                ?.tryApplyConcurrentCameraModeConstraints()\n"
-              "                ?.tryApplyCaptureModeConstraints()\n"
-              "        }\n"
-              "    }\n",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "                ?.tryApplyConcurrentCameraModeConstraints()\n"
-              "                ?.tryApplyCaptureModeConstraints()\n"
-              "        }\n"
-              "    }\n"
-              "\n"
-              "    override suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    ) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(dualRecordingMode = mode)\n"
-              "        }\n"
-              "    }\n",
-              already_applied_marker="override suspend fun setDualRecordingMode(",
-          )
-
-          # ── D. FakeCameraSystem.kt ──────────────────────────────────────
-          FCS = (f"{JCA}/core/camera/testing/src/main/java/"
-                 "com/google/jetpackcamera/core/camera/testing/FakeCameraSystem.kt")
-
-          patch(
-              FCS,
-              "FakeCameraSystem — add setDualRecordingMode() stub",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "        }\n"
-              "    }\n",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "        }\n"
-              "    }\n"
-              "\n"
-              "    override suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    ) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(dualRecordingMode = mode)\n"
-              "        }\n"
-              "    }\n",
-              already_applied_marker="override suspend fun setDualRecordingMode(",
-          )
-
-          print("\nAll patches applied successfully!")
-          PYEOF
-
-      # ── 5b. Fix CameraSession.kt — private → internal ─────────────────────
-      - name: Fix CameraSession.kt visibility (private → internal)
-        run: |
-          FILE="jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
-          python3 - << 'EOF'
-          import re
-          path = "jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
-          with open(path, encoding='utf-8') as f:
-              src = f.read()
-          src = re.sub(r'\bprivate\b(\s+fun\s+getPendingRecording\b)', r'internal\1', src)
-          src = re.sub(r'\bprivate\b(\s+suspend\s+fun\s+startVideoRecordingInternal\b)', r'internal\1', src)
-          with open(path, 'w', encoding='utf-8') as f:
-              f.write(src)
-          print("Done")
-          EOF
-          echo "=== Verify ==="
-          grep -n "fun getPendingRecording\|fun startVideoRecordingInternal" "$FILE"
-
-      # ── 5c. Fix: missing Compose Material Icons dependency ────────────────
-      - name: Patch missing material-icons dependency
-        run: |
-          set -e
-          GRADLE_FILE=""
-          for candidate in \
-            "jca/ui/components/capture/build.gradle.kts" \
-            "jca/ui/components/capture/build.gradle"; do
-            if [ -f "$candidate" ]; then
-              GRADLE_FILE="$candidate"
-              break
-            fi
-          done
-
-          if [ -z "$GRADLE_FILE" ]; then
-            echo "::error::ui/components/capture/build.gradle(.kts) not found"
-            exit 1
-          elif grep -q "material-icons-extended" "$GRADLE_FILE"; then
-            echo "material-icons-extended already present in $GRADLE_FILE, skipping"
-          else
-            awk '
-              /^dependencies[[:space:]]*\{/ && !done {
-                print
-                print "    implementation(\"androidx.compose.material:material-icons-core\")"
-                print "    implementation(\"androidx.compose.material:material-icons-extended\")"
-                done = 1
-                next
-              }
-              { print }
-            ' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
-            echo "Patched $GRADLE_FILE with material-icons dependencies"
-          fi
-
-      # ── 5d. Wire dual-camera UI into PreviewScreen.kt / PreviewViewModel.kt ─
-      #
-      # NOTE: This step is best-effort. It's built from PreviewScreen_patch.md
-      # instructions, NOT from the actual current PreviewScreen.kt source (no
-      # network access was available to fetch it). If this step fails with
-      # "[FAIL] Search text not found", paste the real PreviewScreen.kt /
-      # PreviewViewModel.kt content back so exact patches can be written.
-      # ────────────────────────────────────────────────────────────────────
-      - name: Wire DualCameraButton / PipOverlay into PreviewScreen
-        run: |
-          python3 - << 'PYEOF'
-          import re, sys
-
-          def patch(path, label, old, new, already_applied_marker=None):
-              with open(path, encoding='utf-8') as fh:
-                  src = fh.read()
-              marker = already_applied_marker or new
-              if marker in src:
-                  print(f"[SKIP] {label}")
-                  return
-              if old not in src:
-                  print(f"[FAIL] {label}", file=sys.stderr)
-                  print(f"       Search text not found in: {path}", file=sys.stderr)
-                  sys.exit(1)
-              with open(path, 'w', encoding='utf-8') as fh:
-                  fh.write(src.replace(old, new, 1))
-              print(f"[OK]   {label}")
-
-          def insert_after_last_import(path, label, imports_to_add, marker):
-              with open(path, encoding='utf-8') as fh:
-                  src = fh.read()
-              if marker in src:
-                  print(f"[SKIP] {label}")
-                  return
-              matches = list(re.finditer(r'^import .+$', src, re.MULTILINE))
-              if not matches:
-                  print(f"[FAIL] {label} — no import statements found in {path}", file=sys.stderr)
-                  sys.exit(1)
-              pos = matches[-1].end() + 1
-              new_src = src[:pos] + imports_to_add + src[pos:]
-              with open(path, 'w', encoding='utf-8') as fh:
-                  fh.write(new_src)
-              print(f"[OK]   {label}")
-
-          JCA = "jca"
-          PS = f"{JCA}/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewScreen.kt"
-          PVM = f"{JCA}/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewViewModel.kt"
-
-          # 1. Imports
-          insert_after_last_import(
-              PS,
-              "PreviewScreen — add dual-camera imports",
-              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n"
-              "import com.google.jetpackcamera.model.DualRecordingMode\n"
-              "import com.google.jetpackcamera.ui.components.capture.DualCameraButton\n"
-              "import com.google.jetpackcamera.ui.components.capture.DualCameraModePicker\n"
-              "import com.google.jetpackcamera.ui.components.capture.DraggablePipOverlay\n"
-              "import com.google.jetpackcamera.ui.controller.DualCameraController\n",
-              already_applied_marker="import com.google.jetpackcamera.ui.controller.DualCameraController",
-          )
-
-          # 2. ContentScreen param
-          patch(
-              PS,
-              "PreviewScreen — add dualCameraController param to ContentScreen",
-              "    zoomController: ZoomController? = null,\n",
-              "    zoomController: ZoomController? = null,\n"
-              "    dualCameraController: DualCameraController? = null,\n",
-              already_applied_marker="dualCameraController: DualCameraController? = null",
-          )
-
-          # 3. State + button/overlay lambdas + dialog, inserted right after the
-          #    zoomController param block (before the function body's first line
-          #    that we can safely anchor on: the opening brace on its own line
-          #    is too fragile, so anchor on the dualCameraController param we
-          #    just inserted and drop the block right after the function's `{`).
-          # We anchor on a second occurrence: after the ContentScreen signature
-          # closes with ") {" — this is a common Kotlin formatting pattern.
-          patch(
-              PS,
-              "PreviewScreen — inject dual-camera state + button/overlay lambdas + dialog",
-              "    dualCameraController: DualCameraController? = null,\n",
-              "    dualCameraController: DualCameraController? = null,\n"
-              "    // ↑ existing param list continues below unchanged ↑\n",
-              already_applied_marker="dualCameraButtonLambda",
-          )
-
-          print("\n[MANUAL STEP STILL NEEDED]")
-          print("Imports + the dualCameraController param were patched automatically.")
-          print("Steps 3-9 from PreviewScreen_patch.md (state derivation, button/overlay")
-          print("lambdas, mode-picker dialog, LayoutWrapper wiring, and the")
-          print("PreviewViewModel.kt DualCameraController instantiation) could NOT be")
-          print("safely auto-patched without seeing the real current PreviewScreen.kt —")
-          print("the exact surrounding code (remember blocks, LayoutWrapper call site)")
-          print("is not known. Paste the actual file content back to get an exact patch.")
-          PYEOF
-
-      # ── 6. Verify all patches ─────────────────────────────────────────────
-      - name: Verify patches are in place
-        run: |
-          JCA="jca"
-          FAIL=0
-
-          check() {
-            local file="$1" pattern="$2" label="$3"
-            if grep -q "$pattern" "$file"; then
-              echo "[OK]   $label"
-            else
-              echo "[FAIL] $label"
-              FAIL=1
-            fi
-          }
-
-          check "$JCA/core/settings/src/main/java/com/google/jetpackcamera/settings/model/CameraAppSettings.kt" \
-                "dualRecordingMode" "CameraAppSettings has dualRecordingMode"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSystem.kt" \
-                "setDualRecordingMode" "CameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt" \
-                "setDualRecordingMode" "CameraXCameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/camera/testing/src/main/java/com/google/jetpackcamera/core/camera/testing/FakeCameraSystem.kt" \
-                "setDualRecordingMode" "FakeCameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/model/src/main/java/com/google/jetpackcamera/model/DualRecordingMode.kt" \
-                "DualRecordingMode" "DualRecordingMode.kt exists"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
-                "internal fun getPendingRecording" "CameraSession getPendingRecording is internal"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
-                "internal suspend fun startVideoRecordingInternal" "CameraSession startVideoRecordingInternal is internal"
-
-          check "$JCA/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewScreen.kt" \
-                "DualCameraController? = null" "PreviewScreen has dualCameraController param"
-
-          [ $FAIL -eq 0 ] && echo "All checks passed!" || exit 1
-
-      # ── 7. Java 17 + Gradle ───────────────────────────────────────────────
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
         with:
-          distribution: zulu
-          java-version: 17
+          cmdline-tools-version: "11076708"
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      # ── 8. Build ──────────────────────────────────────────────────────────
-      - name: Build debug APK
+      - name: Install NDK and Build-Tools
         run: |
-          cd jca
-          chmod +x ./gradlew
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            -x test \
-            -x lint
+          sdkmanager --install \
+            "ndk;${{ env.NDK_VERSION }}" \
+            "build-tools;34.0.0" \
+            "platforms;android-34"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
-      # ── 9. Upload APK ─────────────────────────────────────────────────────
+      - name: Extract ReverseShield.zip
+        run: |
+          unzip ReverseShield.zip -d extracted/
+          echo "=== Extracted files ==="
+          find extracted/ -type f
+
+      - name: Clone SDL2
+        run: |
+          git clone --depth=1 --branch ${{ env.SDL2_TAG }} \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL2
+
+      - name: Clone Dear ImGui
+        run: |
+          git clone --depth=1 --branch ${{ env.IMGUI_TAG }} \
+            https://github.com/ocornut/imgui.git /tmp/imgui
+
+      - name: Clone ImPlot
+        run: |
+          git clone --depth=1 --branch ${{ env.IMPLOT_TAG }} \
+            https://github.com/epezent/implot.git /tmp/implot
+
+      - name: Create Android project directories
+        run: |
+          mkdir -p android-build/app/src/main/java/org/libsdl/app
+          mkdir -p android-build/app/src/main/cpp/src/core
+          mkdir -p android-build/app/src/main/cpp/src/ui
+          mkdir -p android-build/app/src/main/res/values
+          mkdir -p android-build/gradle/wrapper
+
+      - name: Copy SDL2 Java source files
+        run: |
+          cp /tmp/SDL2/android-project/app/src/main/java/org/libsdl/app/*.java \
+             android-build/app/src/main/java/org/libsdl/app/
+
+      - name: Copy project C++ sources from zip
+        run: |
+          SRC_DIR=$(find extracted/ -name "main.cpp" -exec dirname {} \; | head -1)
+          echo "Found src at: $SRC_DIR"
+          cp "$SRC_DIR/main.cpp"    android-build/app/src/main/cpp/src/
+          cp "$SRC_DIR/core/"*.hpp  android-build/app/src/main/cpp/src/core/
+          cp "$SRC_DIR/ui/"*.hpp    android-build/app/src/main/cpp/src/ui/
+          echo "=== Copied sources ==="
+          find android-build/app/src/main/cpp/src/ -type f
+
+      - name: Copy SDL2, ImGui, ImPlot sources
+        run: |
+          cp -r /tmp/SDL2    android-build/app/src/main/cpp/SDL2
+          cp -r /tmp/imgui   android-build/app/src/main/cpp/imgui
+          cp -r /tmp/implot  android-build/app/src/main/cpp/implot
+
+      # FIX: Patch app.hpp for Android OpenGL ES 3.0
+      # - Replace desktop OpenGL header with OpenGL ES header
+      # - Remove FORWARD_COMPATIBLE flag (not supported on ES)
+      # - Switch context profile from CORE to ES
+      # - Downgrade minor version 3→0 (use ES 3.0 not OpenGL 3.3)
+      # - Also patch major version 3→3 (keep 3 but explicit for ES)
+      # - Fix ImGui glsl version string
+      - name: Patch app.hpp for OpenGL ES 3.0
+        run: |
+          SRC=android-build/app/src/main/cpp/src/ui/app.hpp
+
+          # Replace SDL_opengl.h with SDL_opengles2.h (works for ES2 and ES3)
+          sed -i 's|#include <SDL_opengl\.h>|#include <SDL_opengles2.h>|g' "$SRC"
+
+          # Remove FORWARD_COMPATIBLE flag line entirely
+          sed -i '/SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG/d' "$SRC"
+
+          # Switch profile from CORE to ES
+          sed -i 's/SDL_GL_CONTEXT_PROFILE_CORE/SDL_GL_CONTEXT_PROFILE_ES/g' "$SRC"
+
+          # Change major version from 3 to 3 (stays 3 for ES3 — no change needed)
+          # Change minor version from 3 to 0  (ES 3.0, not OpenGL 3.3)
+          sed -i 's/SDL_GL_CONTEXT_MINOR_VERSION,\s*3/SDL_GL_CONTEXT_MINOR_VERSION, 0/g' "$SRC"
+
+          # Fix ImGui GLSL version string for ES
+          sed -i 's/ImGui_ImplOpenGL3_Init("#version 330")/ImGui_ImplOpenGL3_Init("#version 300 es")/g' "$SRC"
+
+          echo "=== Patched app.hpp SDL_GL lines ==="
+          grep -n "SDL_GL\|opengl\|OpenGL\|version" "$SRC" || true
+
+      # FIX: CMakeLists.txt written WITHOUT leading spaces (was causing CMake parse errors)
+      - name: Write Android CMakeLists.txt
+        run: |
+          cat > android-build/app/src/main/cpp/CMakeLists.txt << 'CMAKEOF'
+cmake_minimum_required(VERSION 3.22)
+project(reverseshield CXX C)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_subdirectory(SDL2 EXCLUDE_FROM_ALL)
+
+add_library(imgui STATIC
+    imgui/imgui.cpp
+    imgui/imgui_draw.cpp
+    imgui/imgui_tables.cpp
+    imgui/imgui_widgets.cpp
+    imgui/imgui_demo.cpp
+    imgui/backends/imgui_impl_sdl2.cpp
+    imgui/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui PUBLIC imgui imgui/backends)
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
+target_link_libraries(imgui PUBLIC SDL2::SDL2)
+
+add_library(implot STATIC
+    implot/implot.cpp
+    implot/implot_items.cpp
+)
+target_include_directories(implot PUBLIC implot)
+target_link_libraries(implot PUBLIC imgui)
+
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.c)
+add_library(main SHARED ${SOURCES})
+target_include_directories(main PRIVATE src imgui imgui/backends implot)
+target_compile_definitions(main PRIVATE IMGUI_IMPL_OPENGL_ES3)
+target_compile_options(main PRIVATE -O2 -Wall)
+
+find_library(log-lib  log)
+find_library(gles2-lib GLESv2)
+find_library(egl-lib  EGL)
+
+target_link_libraries(main PRIVATE
+    imgui implot SDL2::SDL2 SDL2::SDL2main
+    ${log-lib} ${gles2-lib} ${egl-lib}
+)
+CMAKEOF
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > android-build/app/src/main/AndroidManifest.xml << 'XMLEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.reverseshield.app">
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <uses-feature android:glEsVersion="0x00030000" android:required="true"/>
+    <application
+        android:label="ReverseShield"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="org.libsdl.app.SDLActivity"
+            android:label="ReverseShield"
+            android:screenOrientation="landscape"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="keyboardHidden|keyboard|screenSize|orientation|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+XMLEOF
+
+      - name: Write strings.xml
+        run: |
+          cat > android-build/app/src/main/res/values/strings.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ReverseShield</string>
+</resources>
+EOF
+
+      - name: Write root build.gradle
+        run: |
+          cat > android-build/build.gradle << 'EOF'
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath 'com.android.tools.build:gradle:8.2.2' }
+}
+allprojects { repositories { google(); mavenCentral() } }
+EOF
+
+      - name: Write settings.gradle
+        run: |
+          echo "rootProject.name = 'ReverseShield'" > android-build/settings.gradle
+          echo "include ':app'"                     >> android-build/settings.gradle
+
+      - name: Write gradle.properties
+        run: |
+          cat > android-build/gradle.properties << 'EOF'
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m
+org.gradle.daemon=false
+android.useAndroidX=false
+EOF
+
+      - name: Write app/build.gradle
+        run: |
+          cat > android-build/app/build.gradle << EOF
+apply plugin: 'com.android.application'
+android {
+    namespace          "com.reverseshield.app"
+    compileSdk         34
+    ndkVersion         "${{ env.NDK_VERSION }}"
+    defaultConfig {
+        applicationId  "com.reverseshield.app"
+        minSdk         ${{ env.ANDROID_API }}
+        targetSdk      34
+        versionCode    ${{ env.BUILD_NUMBER }}
+        versionName    "1.0.${{ env.BUILD_NUMBER }}"
+        externalNativeBuild {
+            cmake {
+                cppFlags   "-std=c++20 -DIMGUI_IMPL_OPENGL_ES3"
+                abiFilters "arm64-v8a", "armeabi-v7a"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path    "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    buildTypes {
+        debug   { debuggable true; jniDebuggable true }
+        release { minifyEnabled false; signingConfig signingConfigs.debug }
+    }
+}
+EOF
+
+      - name: Setup Gradle wrapper
+        run: |
+          cat > android-build/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.4-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+          curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradlew" \
+            -o android-build/gradlew
+          chmod +x android-build/gradlew
+          curl -fsSL \
+            "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar" \
+            -o android-build/gradle/wrapper/gradle-wrapper.jar
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android-build/local.properties
+          echo "ndk.dir=$NDK_HOME"    >> android-build/local.properties
+
+      - name: Build Debug APK
+        working-directory: android-build
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          JAVA_HOME:    ${{ env.JAVA_HOME }}
+
+      - name: Show built APK
+        run: find android-build -name "*.apk" -exec ls -lh {} \;
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: jca-dualcam-debug-${{ github.sha }}
-          path: jca/**/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
-          retention-days: 7
+          name: ReverseShield-APK-build${{ env.BUILD_NUMBER }}
+          path: android-build/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-android-apk
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ReverseShield-APK-build${{ github.run_number }}
+          path: release-files/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "ReverseShield ${{ github.ref_name }}"
+          body: |
+            ## ReverseShield Android APK
+            Built with SDL2 + Dear ImGui + ImPlot (Android NDK)
+            - Build number: `${{ github.run_number }}`
+            - Commit: `${{ github.sha }}`
+          files: release-files/**
