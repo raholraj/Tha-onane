@@ -38,11 +38,9 @@ jobs:
           SRC="patches/extracted/jca-dualcam"
           DST="jca"
 
-          # NEW: DualRecordingMode enum (core/model)
           cp "$SRC/core/model/DualRecordingMode.kt" \
              "$DST/core/model/src/main/java/com/google/jetpackcamera/model/"
 
-          # REPLACE: core camera files (already reference DualRecordingMode)
           cp "$SRC/core/camera/CoroutineCameraProvider.kt" \
              "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
           cp "$SRC/core/camera/CameraSessionSettings.kt" \
@@ -50,49 +48,27 @@ jobs:
           cp "$SRC/core/camera/ConcurrentCameraSession.kt" \
              "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
 
-          # NEW: DualCameraController interface
           cp "$SRC/ui/controller/DualCameraController.kt" \
              "$DST/ui/controller/src/main/java/com/google/jetpackcamera/ui/controller/"
 
-          # NEW: DualCameraControllerImpl (calls cameraSystem.setDualRecordingMode)
           cp "$SRC/ui/controller/DualCameraControllerImpl.kt" \
              "$DST/ui/controller/impl/src/main/java/com/google/jetpackcamera/ui/controller/impl/"
 
-          # NEW: Dual-camera Compose components
           cp "$SRC/ui/components/DualCameraComponents.kt" \
              "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
 
-          # REPLACE: CaptureLayout — adds optional dualCameraButton/pipOverlay slots
           cp "$SRC/ui/components/CaptureLayout.kt" \
              "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
 
           echo "All files copied successfully!"
 
       # ── 5. Apply text patches to existing JCA files via Python ────────────
-      #
-      # Why this step?
-      #   DualCameraControllerImpl calls cameraSystem.setDualRecordingMode(), but
-      #   the original CameraSystem interface does not have that method yet.
-      #   The four *_patch.kt / *_patch.md files in our zip describe exactly what
-      #   needs to change in these existing files — we apply those changes here.
-      #
-      # Files patched:
-      #   A) CameraAppSettings.kt   — import + dualRecordingMode field
-      #   B) CameraSystem.kt        — setDualRecordingMode() added to interface
-      #   C) CameraXCameraSystem.kt — override impl + forward into ConcurrentCamera()
-      #   D) FakeCameraSystem.kt    — stub override (test module must compile too)
-      # ──────────────────────────────────────────────────────────────────────
       - name: Apply text patches to existing JCA files
         run: |
           python3 - << 'PYEOF'
           import sys
 
           def patch(path, label, old, new, already_applied_marker=None):
-              """
-              Replace `old` with `new` inside `path`.
-              - Idempotent: skips if `already_applied_marker` (or `new`) is found.
-              - Strict: exits 1 if `old` is not found and patch is not already applied.
-              """
               with open(path, encoding='utf-8') as fh:
                   src = fh.read()
               marker = already_applied_marker or new
@@ -109,11 +85,10 @@ jobs:
 
           JCA = "jca"
 
-          # ── A. CameraAppSettings.kt ─────────────────────────────────────────────
+          # ── A. CameraAppSettings.kt ─────────────────────────────────────
           CAS = (f"{JCA}/core/settings/src/main/java/"
                  "com/google/jetpackcamera/settings/model/CameraAppSettings.kt")
 
-          # A1: insert DualRecordingMode import (after ConcurrentCameraMode — keeps alpha order)
           patch(
               CAS,
               "CameraAppSettings — add DualRecordingMode import",
@@ -123,7 +98,6 @@ jobs:
               already_applied_marker="import com.google.jetpackcamera.model.DualRecordingMode",
           )
 
-          # A2: insert dualRecordingMode field directly after concurrentCameraMode
           patch(
               CAS,
               "CameraAppSettings — add dualRecordingMode field",
@@ -133,7 +107,7 @@ jobs:
               already_applied_marker="val dualRecordingMode: DualRecordingMode",
           )
 
-          # ── B. CameraSystem.kt — add setDualRecordingMode to interface ──────────
+          # ── B. CameraSystem.kt ──────────────────────────────────────────
           CS = (f"{JCA}/core/camera/src/main/java/"
                 "com/google/jetpackcamera/core/camera/CameraSystem.kt")
 
@@ -153,11 +127,10 @@ jobs:
               already_applied_marker="suspend fun setDualRecordingMode(",
           )
 
-          # ── C. CameraXCameraSystem.kt ───────────────────────────────────────────
+          # ── C. CameraXCameraSystem.kt ───────────────────────────────────
           CXCS = (f"{JCA}/core/camera/src/main/java/"
                   "com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt")
 
-          # C1: pass dualRecordingMode into the PerpetualSessionSettings.ConcurrentCamera() call
           patch(
               CXCS,
               "CameraXCameraSystem — forward dualRecordingMode into ConcurrentCamera()",
@@ -169,7 +142,6 @@ jobs:
               already_applied_marker="dualRecordingMode = currentCameraSettings.dualRecordingMode",
           )
 
-          # C2: add setDualRecordingMode override (insert right after setConcurrentCameraMode block)
           patch(
               CXCS,
               "CameraXCameraSystem — add setDualRecordingMode() override",
@@ -198,7 +170,7 @@ jobs:
               already_applied_marker="override suspend fun setDualRecordingMode(",
           )
 
-          # ── D. FakeCameraSystem.kt — stub override so test module compiles ───────
+          # ── D. FakeCameraSystem.kt ──────────────────────────────────────
           FCS = (f"{JCA}/core/camera/testing/src/main/java/"
                  "com/google/jetpackcamera/core/camera/testing/FakeCameraSystem.kt")
 
@@ -229,7 +201,21 @@ jobs:
           print("\nAll patches applied successfully!")
           PYEOF
 
-      # ── 6. Sanity-check: confirm every expected string is present ─────────
+      # ── 5b. Fix CameraSession.kt — private → internal ─────────────────────
+      #
+      # ConcurrentCameraSession.kt calls getPendingRecording() and
+      # startVideoRecordingInternal() from a different file in the same module.
+      # Kotlin file-private blocks cross-file calls, so both must be `internal`.
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Fix CameraSession.kt visibility (private → internal)
+        run: |
+          FILE="jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
+          sed -i 's/private fun getPendingRecording(/internal fun getPendingRecording(/g' "$FILE"
+          sed -i 's/private suspend fun startVideoRecordingInternal(/internal suspend fun startVideoRecordingInternal(/g' "$FILE"
+          echo "=== Verify fix applied ==="
+          grep -n "fun getPendingRecording\|fun startVideoRecordingInternal" "$FILE"
+
+      # ── 6. Sanity-check ───────────────────────────────────────────────────
       - name: Verify patches are in place
         run: |
           JCA="jca"
@@ -259,6 +245,12 @@ jobs:
 
           check "$JCA/core/model/src/main/java/com/google/jetpackcamera/model/DualRecordingMode.kt" \
                 "DualRecordingMode" "DualRecordingMode.kt exists"
+
+          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
+                "internal fun getPendingRecording" "CameraSession getPendingRecording is internal"
+
+          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
+                "internal suspend fun startVideoRecordingInternal" "CameraSession startVideoRecordingInternal is internal"
 
           [ $FAIL -eq 0 ] && echo "All checks passed!" || exit 1
 
