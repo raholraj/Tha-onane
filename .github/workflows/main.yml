@@ -1,4 +1,11 @@
-name: Build JCA Dual-Camera APK
+# .github/workflows/build.yml
+#
+# Builds the JCA dual-camera debug APK on every push/PR.
+# Also auto-patches the ui:components:capture module so the Compose
+# Material Icons (Icons.Outlined.Duo / GridView / PictureInPicture / VideoFile)
+# used in DualCameraComponents.kt actually resolve at compile time.
+
+name: Build JCA Debug APK
 
 on:
   push:
@@ -6,338 +13,94 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build JCA Debug APK
+    name: Assemble debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Change this if your Android project does NOT live in a "jca" subfolder
+    defaults:
+      run:
+        working-directory: jca
 
     steps:
-      # ── 1. Checkout our repo ──────────────────────────────────────────────
-      - name: Checkout our repo (patches)
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          path: patches
+          fetch-depth: 0
 
-      # ── 2. Clone Google's JCA source ──────────────────────────────────────
-      - name: Clone official JCA source
-        run: |
-          git clone https://github.com/google/jetpack-camera-app.git jca
-          echo "JCA cloned — $(git -C jca rev-parse --short HEAD)"
-
-      # ── 3. Unzip our dual-camera package ──────────────────────────────────
-      - name: Extract our patch zip
-        run: |
-          unzip patches/jca-dual-camera.zip -d patches/extracted
-          echo "--- Extracted files ---"
-          find patches/extracted -type f | sort
-
-      # ── 4. Copy new / replacement .kt files into the JCA tree ─────────────
-      - name: Copy new and replacement files into JCA
-        run: |
-          SRC="patches/extracted/jca-dualcam"
-          DST="jca"
-
-          cp "$SRC/core/model/DualRecordingMode.kt" \
-             "$DST/core/model/src/main/java/com/google/jetpackcamera/model/"
-
-          cp "$SRC/core/camera/CoroutineCameraProvider.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-          cp "$SRC/core/camera/CameraSessionSettings.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-          cp "$SRC/core/camera/ConcurrentCameraSession.kt" \
-             "$DST/core/camera/src/main/java/com/google/jetpackcamera/core/camera/"
-
-          cp "$SRC/ui/controller/DualCameraController.kt" \
-             "$DST/ui/controller/src/main/java/com/google/jetpackcamera/ui/controller/"
-
-          cp "$SRC/ui/controller/DualCameraControllerImpl.kt" \
-             "$DST/ui/controller/impl/src/main/java/com/google/jetpackcamera/ui/controller/impl/"
-
-          cp "$SRC/ui/components/DualCameraComponents.kt" \
-             "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
-
-          cp "$SRC/ui/components/CaptureLayout.kt" \
-             "$DST/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/"
-
-          echo "All files copied!"
-
-      # ── 5. Apply text patches to existing JCA files via Python ────────────
-      - name: Apply text patches to existing JCA files
-        run: |
-          python3 - << 'PYEOF'
-          import sys
-
-          def patch(path, label, old, new, already_applied_marker=None):
-              with open(path, encoding='utf-8') as fh:
-                  src = fh.read()
-              marker = already_applied_marker or new
-              if marker in src:
-                  print(f"[SKIP] {label}")
-                  return
-              if old not in src:
-                  print(f"[FAIL] {label}", file=sys.stderr)
-                  print(f"       Search text not found in: {path}", file=sys.stderr)
-                  sys.exit(1)
-              with open(path, 'w', encoding='utf-8') as fh:
-                  fh.write(src.replace(old, new, 1))
-              print(f"[OK]   {label}")
-
-          JCA = "jca"
-
-          # ── A. CameraAppSettings.kt ─────────────────────────────────────
-          CAS = (f"{JCA}/core/settings/src/main/java/"
-                 "com/google/jetpackcamera/settings/model/CameraAppSettings.kt")
-
-          patch(
-              CAS,
-              "CameraAppSettings — add DualRecordingMode import",
-              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n",
-              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n"
-              "import com.google.jetpackcamera.model.DualRecordingMode\n",
-              already_applied_marker="import com.google.jetpackcamera.model.DualRecordingMode",
-          )
-
-          patch(
-              CAS,
-              "CameraAppSettings — add dualRecordingMode field",
-              "    val concurrentCameraMode: ConcurrentCameraMode = ConcurrentCameraMode.OFF,\n",
-              "    val concurrentCameraMode: ConcurrentCameraMode = ConcurrentCameraMode.OFF,\n"
-              "    val dualRecordingMode: DualRecordingMode = DualRecordingMode.PIP,\n",
-              already_applied_marker="val dualRecordingMode: DualRecordingMode",
-          )
-
-          # ── B. CameraSystem.kt ──────────────────────────────────────────
-          CS = (f"{JCA}/core/camera/src/main/java/"
-                "com/google/jetpackcamera/core/camera/CameraSystem.kt")
-
-          patch(
-              CS,
-              "CameraSystem — add setDualRecordingMode() to interface",
-              "    suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode)\n",
-              "    suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode)\n"
-              "\n"
-              "    /**\n"
-              "     * Sets the recording mode used when dual (concurrent) camera mode is active.\n"
-              "     * @param mode The [com.google.jetpackcamera.model.DualRecordingMode] to apply.\n"
-              "     */\n"
-              "    suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    )\n",
-              already_applied_marker="suspend fun setDualRecordingMode(",
-          )
-
-          # ── C. CameraXCameraSystem.kt ───────────────────────────────────
-          CXCS = (f"{JCA}/core/camera/src/main/java/"
-                  "com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt")
-
-          patch(
-              CXCS,
-              "CameraXCameraSystem — forward dualRecordingMode into ConcurrentCamera()",
-              "                                        aspectRatio = currentCameraSettings.aspectRatio\n"
-              "                                    )\n",
-              "                                        aspectRatio = currentCameraSettings.aspectRatio,\n"
-              "                                        dualRecordingMode = currentCameraSettings.dualRecordingMode\n"
-              "                                    )\n",
-              already_applied_marker="dualRecordingMode = currentCameraSettings.dualRecordingMode",
-          )
-
-          patch(
-              CXCS,
-              "CameraXCameraSystem — add setDualRecordingMode() override",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "                ?.tryApplyConcurrentCameraModeConstraints()\n"
-              "                ?.tryApplyCaptureModeConstraints()\n"
-              "        }\n"
-              "    }\n",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "                ?.tryApplyConcurrentCameraModeConstraints()\n"
-              "                ?.tryApplyCaptureModeConstraints()\n"
-              "        }\n"
-              "    }\n"
-              "\n"
-              "    override suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    ) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old?.copy(dualRecordingMode = mode)\n"
-              "        }\n"
-              "    }\n",
-              already_applied_marker="override suspend fun setDualRecordingMode(",
-          )
-
-          # ── D. FakeCameraSystem.kt ──────────────────────────────────────
-          FCS = (f"{JCA}/core/camera/testing/src/main/java/"
-                 "com/google/jetpackcamera/core/camera/testing/FakeCameraSystem.kt")
-
-          patch(
-              FCS,
-              "FakeCameraSystem — add setDualRecordingMode() stub",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "        }\n"
-              "    }\n",
-              "    override suspend fun setConcurrentCameraMode(concurrentCameraMode: ConcurrentCameraMode) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(concurrentCameraMode = concurrentCameraMode)\n"
-              "        }\n"
-              "    }\n"
-              "\n"
-              "    override suspend fun setDualRecordingMode(\n"
-              "        mode: com.google.jetpackcamera.model.DualRecordingMode\n"
-              "    ) {\n"
-              "        currentSettings.update { old ->\n"
-              "            old.copy(dualRecordingMode = mode)\n"
-              "        }\n"
-              "    }\n",
-              already_applied_marker="override suspend fun setDualRecordingMode(",
-          )
-
-          print("\nAll patches applied successfully!")
-          PYEOF
-
-      # ── 5b. Fix CameraSession.kt — private → internal ─────────────────────
-      - name: Fix CameraSession.kt visibility (private → internal)
-        run: |
-          FILE="jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
-          python3 - << 'EOF'
-          import re
-          path = "jca/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt"
-          with open(path, encoding='utf-8') as f:
-              src = f.read()
-          src = re.sub(r'\bprivate\b(\s+fun\s+getPendingRecording\b)', r'internal\1', src)
-          src = re.sub(r'\bprivate\b(\s+suspend\s+fun\s+startVideoRecordingInternal\b)', r'internal\1', src)
-          with open(path, 'w', encoding='utf-8') as f:
-              f.write(src)
-          print("Done")
-          EOF
-          echo "=== Verify ==="
-          grep -n "fun getPendingRecording\|fun startVideoRecordingInternal" "$FILE"
-
-      # ── 5c. Fix DualCameraComponents.kt — replace unavailable icons ────────
-      #
-      # JCA does not depend on material-icons-extended by default.
-      # Icons.Outlined.Duo / GridView / PictureInPicture / VideoFile are in that
-      # extended library and cause "Unresolved reference 'icons'" at compile time.
-      # We replace them with core Material icons that are always available.
-      # ──────────────────────────────────────────────────────────────────────
-      - name: Fix DualCameraComponents.kt icon imports
-        run: |
-          FILE="jca/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt"
-          python3 - << 'EOF'
-          path = "jca/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt"
-          with open(path, encoding='utf-8') as f:
-              src = f.read()
-
-          # Remove extended-library imports that don't exist in core icons
-          replacements = {
-              "import androidx.compose.material.icons.outlined.Duo\n": "",
-              "import androidx.compose.material.icons.outlined.GridView\n": "",
-              "import androidx.compose.material.icons.outlined.PictureInPicture\n": "",
-              "import androidx.compose.material.icons.outlined.VideoFile\n": "",
-          }
-          # Add available replacements after Icons import line
-          replacements["import androidx.compose.material.icons.Icons\n"] = (
-              "import androidx.compose.material.icons.Icons\n"
-              "import androidx.compose.material.icons.outlined.Videocam\n"
-              "import androidx.compose.material.icons.outlined.ViewComfy\n"
-              "import androidx.compose.material.icons.outlined.FilterNone\n"
-              "import androidx.compose.material.icons.outlined.FolderCopy\n"
-          )
-
-          # Replace icon usages
-          usages = {
-              "Icons.Outlined.Duo":             "Icons.Outlined.Videocam",
-              "Icons.Outlined.GridView":        "Icons.Outlined.ViewComfy",
-              "Icons.Outlined.PictureInPicture":"Icons.Outlined.FilterNone",
-              "Icons.Outlined.VideoFile":       "Icons.Outlined.FolderCopy",
-          }
-
-          for old, new in replacements.items():
-              src = src.replace(old, new)
-          for old, new in usages.items():
-              src = src.replace(old, new)
-
-          with open(path, 'w', encoding='utf-8') as f:
-              f.write(src)
-          print("Icons fixed successfully")
-          EOF
-          echo "=== Verify icon imports ==="
-          grep -n "import.*icons\|Icons\." "$FILE"
-
-      # ── 6. Verify all patches ─────────────────────────────────────────────
-      - name: Verify patches are in place
-        run: |
-          JCA="jca"
-          FAIL=0
-
-          check() {
-            local file="$1" pattern="$2" label="$3"
-            if grep -q "$pattern" "$file"; then
-              echo "[OK]   $label"
-            else
-              echo "[FAIL] $label"
-              FAIL=1
-            fi
-          }
-
-          check "$JCA/core/settings/src/main/java/com/google/jetpackcamera/settings/model/CameraAppSettings.kt" \
-                "dualRecordingMode" "CameraAppSettings has dualRecordingMode"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSystem.kt" \
-                "setDualRecordingMode" "CameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraXCameraSystem.kt" \
-                "setDualRecordingMode" "CameraXCameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/camera/testing/src/main/java/com/google/jetpackcamera/core/camera/testing/FakeCameraSystem.kt" \
-                "setDualRecordingMode" "FakeCameraSystem has setDualRecordingMode"
-
-          check "$JCA/core/model/src/main/java/com/google/jetpackcamera/model/DualRecordingMode.kt" \
-                "DualRecordingMode" "DualRecordingMode.kt exists"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
-                "internal fun getPendingRecording" "CameraSession getPendingRecording is internal"
-
-          check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
-                "internal suspend fun startVideoRecordingInternal" "CameraSession startVideoRecordingInternal is internal"
-
-          check "$JCA/ui/components/capture/src/main/java/com/google/jetpackcamera/ui/components/capture/DualCameraComponents.kt" \
-                "Icons.Outlined.Videocam" "DualCameraComponents uses available icons"
-
-          [ $FAIL -eq 0 ] && echo "All checks passed!" || exit 1
-
-      # ── 7. Java 17 + Gradle ───────────────────────────────────────────────
+      # ── Java ────────────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: 17
 
+      # ── Gradle cache ────────────────────────────────────────────────────────
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
-      # ── 8. Build ──────────────────────────────────────────────────────────
-      - name: Build debug APK
+      # ── Fix: missing Compose Material Icons dependency ────────────────────────
+      # Root cause of the "Unresolved reference 'icons'/'Icons'" errors:
+      # ui/components/capture module never declares the material-icons libs.
+      - name: Patch missing material-icons dependency
         run: |
-          cd jca
-          chmod +x ./gradlew
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            -x test \
-            -x lint
+          set -e
+          GRADLE_FILE="ui/components/capture/build.gradle.kts"
+          if [ ! -f "$GRADLE_FILE" ]; then
+            echo "::warning::$GRADLE_FILE not found, skipping icon dependency patch"
+          elif grep -q "material-icons-extended" "$GRADLE_FILE"; then
+            echo "material-icons-extended already present, skipping"
+          else
+            awk '
+              /^dependencies[[:space:]]*\{/ && !done {
+                print
+                print "    implementation(\"androidx.compose.material:material-icons-core\")"
+                print "    implementation(\"androidx.compose.material:material-icons-extended\")"
+                done = 1
+                next
+              }
+              { print }
+            ' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
+            echo "Patched $GRADLE_FILE with material-icons dependencies"
+          fi
 
-      # ── 9. Upload APK ─────────────────────────────────────────────────────
-      - name: Upload APK
+      # ── Spotless format check (mirrors PR gate) ──────────────────────────────
+      - name: Check code formatting
+        run: ./gradlew spotlessCheck --init-script gradle/init.gradle.kts --no-daemon
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: Build stable debug APK
+        run: |
+          ./gradlew assembleStableDebug \
+            --parallel \
+            --build-cache \
+            --no-daemon \
+            -Pandroid.enableBuildCache=true
+
+      # ── Upload artifact ──────────────────────────────────────────────────────
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: jca-dualcam-debug-${{ github.sha }}
-          path: jca/**/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
-          retention-days: 7
+          name: jca-dual-camera-debug-${{ github.sha }}
+          path: jca/app/build/outputs/apk/stable/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      # ── Upload reports on failure ─────────────────────────────────────────────
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports-${{ github.sha }}
+          path: |
+            jca/**/build/reports/
+            jca/**/build/outputs/logs/
+          retention-days: 3
