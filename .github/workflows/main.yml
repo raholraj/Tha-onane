@@ -22,10 +22,6 @@ jobs:
     name: Assemble debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Change this if your Android project does NOT live in a "jca" subfolder
-    defaults:
-      run:
-        working-directory: jca
 
     steps:
       # ── Checkout ────────────────────────────────────────────────────────────
@@ -53,11 +49,20 @@ jobs:
       - name: Patch missing material-icons dependency
         run: |
           set -e
-          GRADLE_FILE="ui/components/capture/build.gradle.kts"
-          if [ ! -f "$GRADLE_FILE" ]; then
-            echo "::warning::$GRADLE_FILE not found, skipping icon dependency patch"
+          GRADLE_FILE=""
+          for candidate in \
+            "ui/components/capture/build.gradle.kts" \
+            "ui/components/capture/build.gradle"; do
+            if [ -f "$candidate" ]; then
+              GRADLE_FILE="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "::warning::ui/components/capture/build.gradle(.kts) not found, skipping icon dependency patch"
           elif grep -q "material-icons-extended" "$GRADLE_FILE"; then
-            echo "material-icons-extended already present, skipping"
+            echo "material-icons-extended already present in $GRADLE_FILE, skipping"
           else
             awk '
               /^dependencies[[:space:]]*\{/ && !done {
@@ -90,7 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jca-dual-camera-debug-${{ github.sha }}
-          path: jca/app/build/outputs/apk/stable/debug/*.apk
+          path: app/build/outputs/apk/stable/debug/*.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -101,6 +106,6 @@ jobs:
         with:
           name: build-reports-${{ github.sha }}
           path: |
-            jca/**/build/reports/
-            jca/**/build/outputs/logs/
+            **/build/reports/
+            **/build/outputs/logs/
           retention-days: 3
