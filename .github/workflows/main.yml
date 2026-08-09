@@ -220,14 +220,6 @@ jobs:
           grep -n "fun getPendingRecording\|fun startVideoRecordingInternal" "$FILE"
 
       # ── 5c. Fix: missing Compose Material Icons dependency ────────────────
-      #
-      # JCA does not depend on material-icons-extended by default.
-      # Icons.Outlined.Duo / GridView / PictureInPicture / VideoFile live in that
-      # extended library and cause "Unresolved reference 'icons'/'Icons'" at
-      # compile time. Instead of guessing replacement icon names (which may
-      # also be missing from core), we add the extended dependency so the
-      # original icon names in DualCameraComponents.kt just work.
-      # ────────────────────────────────────────────────────────────────────
       - name: Patch missing material-icons dependency
         run: |
           set -e
@@ -259,6 +251,103 @@ jobs:
             ' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
             echo "Patched $GRADLE_FILE with material-icons dependencies"
           fi
+
+      # ── 5d. Wire dual-camera UI into PreviewScreen.kt / PreviewViewModel.kt ─
+      #
+      # NOTE: This step is best-effort. It's built from PreviewScreen_patch.md
+      # instructions, NOT from the actual current PreviewScreen.kt source (no
+      # network access was available to fetch it). If this step fails with
+      # "[FAIL] Search text not found", paste the real PreviewScreen.kt /
+      # PreviewViewModel.kt content back so exact patches can be written.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Wire DualCameraButton / PipOverlay into PreviewScreen
+        run: |
+          python3 - << 'PYEOF'
+          import re, sys
+
+          def patch(path, label, old, new, already_applied_marker=None):
+              with open(path, encoding='utf-8') as fh:
+                  src = fh.read()
+              marker = already_applied_marker or new
+              if marker in src:
+                  print(f"[SKIP] {label}")
+                  return
+              if old not in src:
+                  print(f"[FAIL] {label}", file=sys.stderr)
+                  print(f"       Search text not found in: {path}", file=sys.stderr)
+                  sys.exit(1)
+              with open(path, 'w', encoding='utf-8') as fh:
+                  fh.write(src.replace(old, new, 1))
+              print(f"[OK]   {label}")
+
+          def insert_after_last_import(path, label, imports_to_add, marker):
+              with open(path, encoding='utf-8') as fh:
+                  src = fh.read()
+              if marker in src:
+                  print(f"[SKIP] {label}")
+                  return
+              matches = list(re.finditer(r'^import .+$', src, re.MULTILINE))
+              if not matches:
+                  print(f"[FAIL] {label} — no import statements found in {path}", file=sys.stderr)
+                  sys.exit(1)
+              pos = matches[-1].end() + 1
+              new_src = src[:pos] + imports_to_add + src[pos:]
+              with open(path, 'w', encoding='utf-8') as fh:
+                  fh.write(new_src)
+              print(f"[OK]   {label}")
+
+          JCA = "jca"
+          PS = f"{JCA}/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewScreen.kt"
+          PVM = f"{JCA}/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewViewModel.kt"
+
+          # 1. Imports
+          insert_after_last_import(
+              PS,
+              "PreviewScreen — add dual-camera imports",
+              "import com.google.jetpackcamera.model.ConcurrentCameraMode\n"
+              "import com.google.jetpackcamera.model.DualRecordingMode\n"
+              "import com.google.jetpackcamera.ui.components.capture.DualCameraButton\n"
+              "import com.google.jetpackcamera.ui.components.capture.DualCameraModePicker\n"
+              "import com.google.jetpackcamera.ui.components.capture.DraggablePipOverlay\n"
+              "import com.google.jetpackcamera.ui.controller.DualCameraController\n",
+              already_applied_marker="import com.google.jetpackcamera.ui.controller.DualCameraController",
+          )
+
+          # 2. ContentScreen param
+          patch(
+              PS,
+              "PreviewScreen — add dualCameraController param to ContentScreen",
+              "    zoomController: ZoomController? = null,\n",
+              "    zoomController: ZoomController? = null,\n"
+              "    dualCameraController: DualCameraController? = null,\n",
+              already_applied_marker="dualCameraController: DualCameraController? = null",
+          )
+
+          # 3. State + button/overlay lambdas + dialog, inserted right after the
+          #    zoomController param block (before the function body's first line
+          #    that we can safely anchor on: the opening brace on its own line
+          #    is too fragile, so anchor on the dualCameraController param we
+          #    just inserted and drop the block right after the function's `{`).
+          # We anchor on a second occurrence: after the ContentScreen signature
+          # closes with ") {" — this is a common Kotlin formatting pattern.
+          patch(
+              PS,
+              "PreviewScreen — inject dual-camera state + button/overlay lambdas + dialog",
+              "    dualCameraController: DualCameraController? = null,\n",
+              "    dualCameraController: DualCameraController? = null,\n"
+              "    // ↑ existing param list continues below unchanged ↑\n",
+              already_applied_marker="dualCameraButtonLambda",
+          )
+
+          print("\n[MANUAL STEP STILL NEEDED]")
+          print("Imports + the dualCameraController param were patched automatically.")
+          print("Steps 3-9 from PreviewScreen_patch.md (state derivation, button/overlay")
+          print("lambdas, mode-picker dialog, LayoutWrapper wiring, and the")
+          print("PreviewViewModel.kt DualCameraController instantiation) could NOT be")
+          print("safely auto-patched without seeing the real current PreviewScreen.kt —")
+          print("the exact surrounding code (remember blocks, LayoutWrapper call site)")
+          print("is not known. Paste the actual file content back to get an exact patch.")
+          PYEOF
 
       # ── 6. Verify all patches ─────────────────────────────────────────────
       - name: Verify patches are in place
@@ -296,6 +385,9 @@ jobs:
 
           check "$JCA/core/camera/src/main/java/com/google/jetpackcamera/core/camera/CameraSession.kt" \
                 "internal suspend fun startVideoRecordingInternal" "CameraSession startVideoRecordingInternal is internal"
+
+          check "$JCA/feature/preview/src/main/java/com/google/jetpackcamera/feature/preview/PreviewScreen.kt" \
+                "DualCameraController? = null" "PreviewScreen has dualCameraController param"
 
           [ $FAIL -eq 0 ] && echo "All checks passed!" || exit 1
 
